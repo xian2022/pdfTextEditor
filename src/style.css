@@ -161,10 +161,10 @@ body.viewing .text-line { display: none; }
   border: 2px solid #fff; border-radius: 2px; cursor: nwse-resize;
 }
 .box.selected .box-resize, .box.editing .box-resize { display: block; }
-/* 原文删除区域标记：导出时真正删除该区域原文（背景保留），半透明高亮提示 */
+/* 原文删除区域标记：背景为页面原像素裁剪（隐藏原文），选中时虚线提示 */
 .cover-mark {
   position: absolute; z-index: 1;
-  background: rgba(37, 99, 235, .12);
+  background: none;
   outline: none;
   cursor: pointer;
 }

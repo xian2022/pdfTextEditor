@@ -81,6 +81,33 @@ async function removeTextFromPage(pdfDoc, page, rect, expectGlyphs) {
   return any;
 }
 
+/**
+ * 仅删除指定页面的原文文字（不绘制任何标注），返回新 PDF 字节
+ * 供编辑器界面实时重绘页面使用（所见即所得：原文创建文本框后立即从画面消失）
+ */
+export async function deleteTextOnly(sourceBytes, pageIndex, deletions) {
+  const pdfDoc = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
+  const pages = pdfDoc.getPages();
+  const page = pages[pageIndex];
+  if (!page) return null;
+  for (const ann of deletions) {
+    const { height } = page.getSize();
+    const rect = {
+      x0: ann.x - 2,
+      x1: ann.x + ann.w + 2,
+      y0: height - ann.y - ann.h - 2,
+      y1: height - ann.y + 2,
+    };
+    const expect = String(ann.origText || '').length || -1;
+    try {
+      await removeTextFromPage(pdfDoc, page, rect, expect);
+    } catch (err) {
+      console.warn('界面重绘删除失败', err);
+    }
+  }
+  return pdfDoc.save();
+}
+
 function hexToRgb(hex) {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex || '');
   if (!m) return rgb(0, 0, 0);

@@ -1,6 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist';
 import { PDFDocument, PDFName, PDFRef } from 'pdf-lib';
-import { savePdf, preloadFont, loadFontBytes } from './pdf-save.js';
+import { savePdf, preloadFont, loadFontBytes, deleteTextOnly } from './pdf-save.js';
 import { fonts, DEFAULT_FONT_ID, addFontFromBytes, initDefaultFont, familyFor, defaultFontName } from './fonts.js';
 import './style.css';
 
@@ -81,6 +81,7 @@ function restore(snap) {
   rerenderBoxes();
   selectBox(null, null);
   refreshUndoButtons();
+  for (const p of pages) schedulePageRefresh(p); // 撤销/重做后同步重绘页面
 }
 
 function undo() {
@@ -535,6 +536,7 @@ function editTextLine(p, line, andEdit) {
   fitBox(box, boxEl);
   selectBox(box, boxEl);
   if (andEdit) startEditing(box, boxEl);
+  schedulePageRefresh(p); // 原文立即从画面删除
 }
 
 // ---------------- 文本框（双击空白处新建） ----------------
@@ -586,6 +588,7 @@ function removeBox(box, boxEl) {
   if (page) {
     const i = page.boxes.indexOf(box);
     if (i >= 0) page.boxes.splice(i, 1);
+    schedulePageRefresh(page); // 原文恢复显示
   }
   if (boxEl) {
     if (boxEl._coverMark) boxEl._coverMark.remove();
@@ -620,6 +623,7 @@ function pasteBox() {
   pg.overlay.appendChild(nbEl);
   fitBox(nb, nbEl);
   selectBox(nb, nbEl);
+  schedulePageRefresh(pg); // 粘贴的原文框同样删除原区域文字
 }
 
 // ---------------- 编辑框状态机：预览 / 选中 / 编辑 ----------------
@@ -690,7 +694,7 @@ function createBoxElement(box, page) {
   root.appendChild(del);
   root.appendChild(handle);
 
-  // 原文删除区域标记：半透明高亮提示（导出时删除该区域原文，背景保留）
+  // 原文删除区域标记：完全透明（原文已从重绘后的画面中删除），仅作点击捕获与选中虚线提示
   if (box.coverRect) {
     const mark = document.createElement('div');
     mark.className = 'cover-mark';
@@ -1122,6 +1126,7 @@ function discardEdits() {
   refreshUndoButtons();
   clearSession();
   selectBox(null, null);
+  for (const p of pages) schedulePageRefresh(p); // 恢复原始画面
   setStatus('已放弃本次编辑，恢复为原始文档。', false);
 }
 
@@ -1450,6 +1455,51 @@ function hidePageBadge() {
 window.addEventListener('scroll', () => {
   if (pages.length) updatePageBadge();
 }, { passive: true });
+
+// ---------------- 页面实时重绘（原文删除的所见即所得） ----------------
+// 创建/删除文本框后，用文字删除引擎重绘该页：原文立刻从画面消失，与导出一致
+const refreshTimers = new Map();
+
+function schedulePageRefresh(p) {
+  if (!p || !pdfBytes) return;
+  clearTimeout(refreshTimers.get(p));
+  refreshTimers.set(
+    p,
+    setTimeout(() => refreshPageDisplay(p), 250)
+  );
+}
+
+async function refreshPageDisplay(p) {
+  try {
+    const deletions = [];
+    for (const b of p.boxes) {
+      if (b.coverRect) {
+        deletions.push({
+          pageIndex: 0,
+          x: b.coverRect.x / RENDER_SCALE,
+          y: b.coverRect.y / RENDER_SCALE,
+          w: b.coverRect.w / RENDER_SCALE,
+          h: b.coverRect.h / RENDER_SCALE,
+          origText: b.origText || b.text || '',
+          boxId: b.id,
+        });
+      }
+    }
+    const bytes = await deleteTextOnly(pdfBytes, p.num - 1, deletions);
+    if (!bytes) return;
+    const doc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+    const page = await doc.getPage(p.num);
+    const viewport = page.getViewport({ scale: RENDER_SCALE });
+    if (viewport.width !== p.canvas.width || viewport.height !== p.canvas.height) {
+      p.canvas.width = viewport.width;
+      p.canvas.height = viewport.height;
+    }
+    await page.render({ canvasContext: p.canvas.getContext('2d'), viewport }).promise;
+    await doc.destroy();
+  } catch (err) {
+    console.warn('页面重绘失败', err);
+  }
+}
 
 // ---------------- 初始化 ----------------
 refreshFontSelect();
