@@ -264,13 +264,13 @@ async function buildFontNameMap(p) {
   }
 }
 
-/** 字体别名：PDF 里的字体名（中/英）映射到字体库文件名 */
+/** 字体别名：PDF 里的字体名（中/英）映射到字体库文件名，双向互认 */
 const FONT_ALIASES = {
-  simsun: '宋体', nsimsun: '宋体', songti: '宋体', 'noto serif cjk sc': '宋体',
-  simhei: '黑体', heiti: '黑体',
-  kaiti: '楷体', 'kai': '楷体',
-  fangsong: '仿宋', 'fang song': '仿宋',
-  'microsoft yahei': '微软雅黑', msyh: '微软雅黑', yahei: '微软雅黑',
+  simsun: '宋体', nsimsun: '宋体', songti: '宋体', 'noto serif cjk sc': '宋体', '宋体': 'simsun',
+  simhei: '黑体', heiti: '黑体', '黑体': 'simhei',
+  kaiti: '楷体', kai: '楷体', '楷体': 'kaiti',
+  fangsong: '仿宋', 'fang song': '仿宋', '仿宋': 'fangsong',
+  'microsoft yahei': '微软雅黑', msyh: '微软雅黑', yahei: '微软雅黑', '微软雅黑': 'msyh',
   dengxian: '微软雅黑',
   arial: 'arial', 'times new roman': 'times new roman', couriernew: 'courier new', courier: 'courier new',
   calibri: 'calibri', cambria: 'cambria',

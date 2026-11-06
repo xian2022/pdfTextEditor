@@ -1,5 +1,6 @@
 import { PDFDocument, PDFName, PDFRef, rgb, degrees } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
+import { createSafeSubset } from './font-subset.js';
 import { tokenize, findTextRuns, markRunsInRect, serializeOps } from './text-removal.js';
 
 const latin1 = (bytes) => {
@@ -125,11 +126,42 @@ export async function buildPdf(sourceBytes, annotations, defaultFontBytes, extra
   }
 
   pdfDoc.registerFontkit(fontkit);
+
+  // ---- 字体子集：用现代 fontkit 生成合法子集（含 cmap），避免旧版子集在 Chrome 渲染缺失 ----
+  const charsByFont = new Map();
+  for (const ann of annotations) {
+    const text = ann.text || '';
+    if (!text.trim()) continue;
+    let set = charsByFont.get(ann.fontId);
+    if (!set) {
+      set = new Set();
+      charsByFont.set(ann.fontId, set);
+    }
+    for (const ch of text) set.add(ch);
+  }
+  const subsetCache = new Map();
+  for (const [fontId, set] of charsByFont) {
+    const bytes = fontId === '__default__' ? defaultFontBytes : extraFonts?.get(fontId)?.bytes;
+    if (!bytes) continue;
+    try {
+      subsetCache.set(fontId, createSafeSubset(bytes, [...set].join('')));
+    } catch (err) {
+      console.warn('字体子集生成失败，回退内置子集路径', fontId, err);
+    }
+  }
+
   const embedded = new Map();
   const getFont = async (fontId) => {
     if (!embedded.has(fontId)) {
-      const bytes = (fontId && extraFonts?.get(fontId)?.bytes) || defaultFontBytes;
-      embedded.set(fontId, await pdfDoc.embedFont(bytes, { subset: true }));
+      const subBytes = subsetCache.get(fontId);
+      if (subBytes) {
+        // customName 让 pdf-lib 跳过字体名解析（旧版 fontkit 解析子集 name 表会崩溃）
+        const name = 'F' + String(fontId || 'x').replace(/[^A-Za-z0-9]/g, '_');
+        embedded.set(fontId, await pdfDoc.embedFont(subBytes, { subset: false, customName: name }));
+      } else {
+        const bytes = (fontId && extraFonts?.get(fontId)?.bytes) || defaultFontBytes;
+        embedded.set(fontId, await pdfDoc.embedFont(bytes, { subset: true }));
+      }
     }
     return embedded.get(fontId);
   };
