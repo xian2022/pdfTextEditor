@@ -1,0 +1,11 @@
+node_modules/
+dist/
+release/
+public/fonts/
+public/fonts-library/
+public/pdf.worker.min.mjs
+.idea/
+.DS_Store
+*.log
+test-input.pdf
+test-output.pdf
