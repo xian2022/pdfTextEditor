@@ -134,7 +134,19 @@ async function openPdf(file, password) {
       setStatus('已取消打开：需要密码。', true);
       return;
     }
-    setStatus('无法打开该 PDF：' + (err?.message || err), true);
+    const msg = String(err?.message || err);
+    // 旧页面缓存的 worker 路径失效（构建哈希变化）：自动强制刷新加载新代码
+    if (/fake worker|Failed to fetch dynamically imported module/i.test(msg)) {
+      try {
+        if (!sessionStorage.getItem('pdf-editor-auto-reloaded')) {
+          sessionStorage.setItem('pdf-editor-auto-reloaded', '1');
+          setStatus('检测到旧版本缓存，正在自动刷新…', false);
+          setTimeout(() => location.reload(), 300);
+          return;
+        }
+      } catch { /* ignore */ }
+    }
+    setStatus('无法打开该 PDF：' + msg, true);
     return;
   }
   pdfBytes = bytes; // 解析成功后才覆盖，避免失败时污染会话/导出数据
