@@ -1,5 +1,84 @@
-import { PDFDocument, rgb, degrees } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFRef, rgb, degrees } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
+import { tokenize, findTextRuns, markRunsInRect, serializeOps } from './text-removal.js';
+
+const latin1 = (bytes) => {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return s;
+};
+const encode = (str) => {
+  const arr = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) arr[i] = str.charCodeAt(i) & 0xff;
+  return arr;
+};
+async function inflate(bytes) {
+  try {
+    const ds = new DecompressionStream('deflate');
+    const stream = new Blob([bytes]).stream().pipeThrough(ds);
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  } catch {
+    return bytes;
+  }
+}
+
+/**
+ * 真正删除页面内容流中指定矩形区域内的文字绘制指令（保留背景）
+ * @returns {boolean} 是否成功删除至少一条文字
+ */
+async function removeTextFromPage(pdfDoc, page, rect, expectGlyphs) {
+  let any = false;
+  const contents = page.node.Contents();
+  const arr = contents && contents.asArray ? contents.asArray() : contents ? [contents] : [];
+  const parts = [];
+  for (const item of arr) {
+    const obj = item instanceof PDFRef ? pdfDoc.context.lookup(item) : item;
+    const raw = obj && obj.getContents ? new Uint8Array(obj.getContents()) : null;
+    if (!raw) continue;
+    const dec = await inflate(raw);
+    const str = latin1(dec);
+    const ops = tokenize(str);
+    const runs = findTextRuns(ops);
+    const res = markRunsInRect(runs, rect, expectGlyphs);
+    if (res && res.marked.size > 0) {
+      parts.push(serializeOps(ops, res.marked));
+      any = true;
+    } else {
+      parts.push(str);
+    }
+  }
+  if (any && parts.length) {
+    const merged = parts.join('\n');
+    page.node.set(PDFName.of('Contents'), pdfDoc.context.stream(encode(merged)));
+  }
+  // 表单 XObject（页面资源里嵌套的内容流）
+  try {
+    const res = page.node.Resources();
+    let xobj = res && res.lookup(PDFName.of('XObject'));
+    if (xobj instanceof PDFRef) xobj = pdfDoc.context.lookup(xobj);
+    if (xobj && typeof xobj.keys === 'function') {
+      for (const key of xobj.keys()) {
+        const val = xobj.lookup(key);
+        const obj = val instanceof PDFRef ? pdfDoc.context.lookup(val) : val;
+        const subtype = obj && obj.dict && obj.dict.get ? String(obj.dict.get(PDFName.of('Subtype'))) : '';
+        if (subtype !== '/Form') continue;
+        const raw = obj.getContents ? new Uint8Array(obj.getContents()) : null;
+        if (!raw) continue;
+        const dec = await inflate(raw);
+        const ops = tokenize(latin1(dec));
+        const runs = findTextRuns(ops);
+        const r2 = markRunsInRect(runs, rect, expectGlyphs);
+        if (r2 && r2.marked.size > 0) {
+          xobj.set(key, pdfDoc.context.stream(encode(serializeOps(ops, r2.marked))));
+          any = true;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('XObject 文字删除处理失败', err);
+  }
+  return any;
+}
 
 function hexToRgb(hex) {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex || '');
@@ -18,6 +97,33 @@ function hexToRgb(hex) {
  */
 export async function buildPdf(sourceBytes, annotations, defaultFontBytes, extraFonts) {
   const pdfDoc = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
+
+  // ---- 第一步：真正删除原文（解析内容流移除文字绘制指令，背景保留） ----
+  const deletedBoxIds = new Set();
+  const removalTargets = annotations.filter((a) => a.deleteOriginal);
+  if (removalTargets.length) {
+    const pages = pdfDoc.getPages();
+    for (const ann of removalTargets) {
+      const page = pages[ann.pageIndex];
+      if (!page) continue;
+      const { height } = page.getSize();
+      // 矩形外扩 2pt 余量，避免浮点精度导致的边界误判
+      const rect = {
+        x0: ann.x - 2,
+        x1: ann.x + ann.w + 2,
+        y0: height - ann.y - ann.h - 2,
+        y1: height - ann.y + 2,
+      };
+      const expect = String(ann.origText || '').length || -1;
+      try {
+        const ok = await removeTextFromPage(pdfDoc, page, rect, expect);
+        if (ok) deletedBoxIds.add(ann.boxId);
+      } catch (err) {
+        console.warn('原文删除失败，回退遮盖', err);
+      }
+    }
+  }
+
   pdfDoc.registerFontkit(fontkit);
   const embedded = new Map();
   const getFont = async (fontId) => {
@@ -35,13 +141,24 @@ export async function buildPdf(sourceBytes, annotations, defaultFontBytes, extra
     const { height } = page.getSize();
     // 页面坐标：pdf-lib 原点在左下角，标注的 y 是距顶部距离
     const rectTop = height - ann.y - ann.h;
+
+    // 原文遮盖标注：原文已成功删除则整个跳过（背景原样保留）
+    if (ann.deleteOriginal) {
+      if (deletedBoxIds.has(ann.boxId)) continue;
+    }
+
+    const deleted = ann.boxId != null && deletedBoxIds.has(ann.boxId);
     if (ann.whiteout && ann.bgColor && ann.w > 0 && ann.h > 0) {
-      // 遮盖块颜色 = 文本框底色（默认白）
-      page.drawRectangle({
-        x: ann.x, y: rectTop,
-        width: ann.w, height: ann.h,
-        color: hexToRgb(ann.bgColor),
-      });
+      // 原文已删除且文本框未移动：跳过填充，避免覆盖照片/彩色背景
+      if (deleted && ann.skipWhiteoutIfDeleted) {
+        // 不填充
+      } else {
+        page.drawRectangle({
+          x: ann.x, y: rectTop,
+          width: ann.w, height: ann.h,
+          color: hexToRgb(ann.bgColor),
+        });
+      }
     }
     const text = ann.text || '';
     if (!text.trim()) continue; // 空文本仅做遮盖（例如删除原文）

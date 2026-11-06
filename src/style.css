@@ -161,14 +161,14 @@ body.viewing .text-line { display: none; }
   border: 2px solid #fff; border-radius: 2px; cursor: nwse-resize;
 }
 .box.selected .box-resize, .box.editing .box-resize { display: block; }
-/* 原文位置遮盖块：实心底色盖住原文（移动文本框后立即生效），选中时加虚线提示 */
+/* 原文删除区域标记：导出时真正删除该区域原文（背景保留），半透明高亮提示 */
 .cover-mark {
   position: absolute; z-index: 1;
-  background: #fff;
+  background: rgba(37, 99, 235, .12);
   outline: none;
   cursor: pointer;
 }
-.cover-mark.show { outline: 1.5px dashed rgba(148, 163, 184, .9); }
+.cover-mark.show { outline: 1.5px dashed rgba(37, 99, 235, .6); }
 body.viewing .box { border-color: transparent; background: transparent; }
 body.viewing .box-del, body.viewing .box-resize { display: none; }
 body.viewing .box:hover:not(.selected):not(.editing) { outline: none; }

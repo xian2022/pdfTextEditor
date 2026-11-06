@@ -323,14 +323,34 @@ function detectLineColors(ctx, p, line) {
   const lum = (key) => (key >> 8) * 0.299 + ((key >> 4) & 15) * 0.587 + (key & 15) * 0.114;
   const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   const bgKey = sorted[0][0];
-  // 近白背景（如 #f7f7f7）归一为纯白，避免在视觉白色区域出现灰色补丁
-  const bg = lum(bgKey) > 14.2 ? '#ffffff' : toHex(bgKey);
   const threshold = Math.max(8, Math.floor(total * 0.01));
   let best = null;
   for (const [key, n] of sorted) {
     if (key === bgKey) continue;
     if (n < threshold) continue;
     if (best == null || lum(key) < lum(best)) best = key;
+  }
+  const textKey = best == null ? 0 : best;
+  const textR = (textKey >> 8) << 4, textG = ((textKey >> 4) & 15) << 4, textB = (textKey & 15) << 4;
+  // 背景色 = 排除文字像素后的平均色（纯色/渐变/图片背景都取局部近似）
+  let sr = 0, sg = 0, sb = 0, cnt = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 200) continue;
+    const dr = data[i] - textR, dg = data[i + 1] - textG, db = data[i + 2] - textB;
+    if (dr * dr + dg * dg + db * db < 3600) continue; // 距文字色太近的像素跳过
+    sr += data[i];
+    sg += data[i + 1];
+    sb += data[i + 2];
+    cnt++;
+  }
+  let bg = '#ffffff';
+  if (cnt > 0) {
+    const ar = Math.round(sr / cnt), ag = Math.round(sg / cnt), ab = Math.round(sb / cnt);
+    // 近白背景归一为纯白，避免在视觉白色区域出现灰块
+    const avgLum = 0.299 * ar + 0.587 * ag + 0.114 * ab;
+    if (avgLum <= 250) {
+      bg = '#' + [ar, ag, ab].map((v) => Math.min(255, v).toString(16).padStart(2, '0')).join('');
+    }
   }
   return { color: best == null ? '#000000' : toHex(best), bg };
 }
@@ -503,6 +523,7 @@ function editTextLine(p, line, andEdit) {
     underline: false,
     fromText: true,
     origFamily,
+    origText: line.text, // 原文（导出时用于定位并删除原文字形）
     vertical: !!line.vertical,
     // 记住原文位置：移动文本框后，导出时在原位置补一块底色遮盖原文
     coverRect: { x: line.x0 * RENDER_SCALE, y: (p.heightPt - line.y1) * RENDER_SCALE, w: (line.x1 - line.x0) * RENDER_SCALE, h: (line.y1 - line.y0) * RENDER_SCALE },
@@ -669,8 +690,7 @@ function createBoxElement(box, page) {
   root.appendChild(del);
   root.appendChild(handle);
 
-  // 原文位置遮盖块：文本框移走后，原位置文字立即被盖住（与导出效果一致）
-  // 遮盖块始终不透明，颜色用检测到的原文背景色
+  // 原文删除区域标记：半透明高亮提示（导出时删除该区域原文，背景保留）
   if (box.coverRect) {
     const mark = document.createElement('div');
     mark.className = 'cover-mark';
@@ -678,7 +698,6 @@ function createBoxElement(box, page) {
     mark.style.top = box.coverRect.y + 'px';
     mark.style.width = box.coverRect.w + 'px';
     mark.style.height = box.coverRect.h + 'px';
-    mark.style.backgroundColor = box.coverBg || box.bgColor || '#ffffff';
     // 点击原位置：选中对应的文本框（而不是穿透到原文层再建新框）
     mark.addEventListener('mousedown', (e) => {
       e.preventDefault();
@@ -734,8 +753,6 @@ function applyBoxStyle(root, box) {
   root.style.width = box.w + 'px';
   root.style.height = box.h + 'px';
   root.style.backgroundColor = box.bgColor || 'transparent';
-  // 原文位置遮盖块始终不透明，用检测到的原文背景色
-  if (root._coverMark) root._coverMark.style.backgroundColor = box.coverBg || box.bgColor || '#ffffff';
   const t = root.querySelector('.box-text');
   t.style.fontSize = box.fontSize * RENDER_SCALE + 'px';
   t.style.color = box.color || '#000000';
@@ -983,8 +1000,7 @@ async function save() {
     }
     for (const b of p.boxes) {
       if (!b.text.trim() && !b.bgColor) continue; // 空文本且无底色：跳过
-      // 原文位置遮盖：文本框被移走后，在原位置补一块底色盖住原文
-      // 始终遮盖（用检测到的原文背景色），因为移动文本框即代表原文被移走
+      // 原文删除标记：导出时真正删除原文文字绘制指令（背景保留），失败才回退遮盖
       if (b.coverRect) {
         annotations.push({
           pageIndex: i,
@@ -996,8 +1012,15 @@ async function save() {
           fontSize: b.fontSize,
           whiteout: true,
           bgColor: b.coverBg || b.bgColor || '#ffffff',
+          deleteOriginal: true,
+          origText: b.origText || b.text || '',
+          boxId: b.id,
         });
       }
+      // 文本框是否已从原位置移走（移走则保留当前位置的用户底色）
+      const moved = b.coverRect
+        ? Math.abs(b.x - b.coverRect.x) > 4 || Math.abs(b.y - b.coverRect.y) > 4
+        : true;
       // 竖向框：确保逐字换行输出（不同浏览器 innerText 行为可能不同）
       let textOut = b.text || '';
       if (b.vertical && !textOut.includes('\n')) textOut = textOut.split('').join('\n');
@@ -1016,6 +1039,8 @@ async function save() {
         bold: !!b.bold,
         italic: !!b.italic,
         underline: !!b.underline,
+        boxId: b.id,
+        skipWhiteoutIfDeleted: !moved, // 原文删除成功且未移动时跳过填充
       });
     }
   }
