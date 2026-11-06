@@ -323,6 +323,8 @@ function detectLineColors(ctx, p, line) {
   const lum = (key) => (key >> 8) * 0.299 + ((key >> 4) & 15) * 0.587 + (key & 15) * 0.114;
   const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   const bgKey = sorted[0][0];
+  // 众数背景（界面视觉遮罩用，近白归一纯白）
+  const bgMode = lum(bgKey) > 14.2 ? '#ffffff' : toHex(bgKey);
   const threshold = Math.max(8, Math.floor(total * 0.01));
   let best = null;
   for (const [key, n] of sorted) {
@@ -352,7 +354,7 @@ function detectLineColors(ctx, p, line) {
       bg = '#' + [ar, ag, ab].map((v) => Math.min(255, v).toString(16).padStart(2, '0')).join('');
     }
   }
-  return { color: best == null ? '#000000' : toHex(best), bg };
+  return { color: best == null ? '#000000' : toHex(best), bg, bgMode };
 }
 
 async function ensureTextLayer(p) {
@@ -463,6 +465,7 @@ async function ensureTextLayer(p) {
         const det = detectLineColors(ctx, p, line);
         line.color = det.color;
         line.bg = det.bg;
+        line.bgMode = det.bgMode;
       }
     } catch (err) {
       console.warn('颜色检测失败', err);
@@ -513,9 +516,10 @@ function editTextLine(p, line, andEdit) {
     h: (line.y1 - line.y0) * RENDER_SCALE,
     text: line.text,
     fontSize: clamp(Math.round(avgSize), 6, 72),
-    whiteout: true, // 原文编辑默认遮盖原文字
-    bgColor: line.bg || '#ffffff', // 默认底色 = 检测到的原文背景色
-    coverBg: line.bg || '#ffffff', // 原位置遮盖块永远用原文背景色
+    whiteout: true, // 原文编辑默认遮盖原文字（删除失败时回退遮盖）
+    bgColor: null, // 默认无色：导出时真正删除原文，不填充任何颜色
+    maskBg: line.bgMode || line.bg || '#ffffff', // 仅界面视觉遮罩（众数背景色，近白归一白），不参与导出
+    coverBg: line.bg || '#ffffff', // 删除失败回退遮盖时用平均背景色
     color: line.color || '#000000',
     fontId: matchFont(line.family) || el.fontSelect.value,
     bold: false,
@@ -752,7 +756,12 @@ function applyBoxStyle(root, box) {
   root.style.top = box.y + 'px';
   root.style.width = box.w + 'px';
   root.style.height = box.h + 'px';
-  root.style.backgroundColor = box.bgColor || 'transparent';
+  // 底色：用户设置优先；原文框无底色时用检测背景色做纯视觉遮罩（不参与导出）
+  root.style.backgroundColor = box.bgColor
+    ? box.bgColor
+    : box.fromText
+      ? box.maskBg || 'transparent'
+      : 'transparent';
   const t = root.querySelector('.box-text');
   t.style.fontSize = box.fontSize * RENDER_SCALE + 'px';
   t.style.color = box.color || '#000000';
