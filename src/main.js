@@ -296,11 +296,11 @@ function matchFont(origFamily) {
 }
 
 /**
- * 从渲染画布采样，检测一行文字的实际颜色：
- * 取「背景（最常见色）之外、像素数达标的颜色中最暗的一个」——
- * 细笔画文字的抗锯齿灰像素多，取最暗才能得到真实墨色而不是灰。
+ * 从渲染画布采样，返回 { color, bg }：
+ * - color：背景之外「最暗且像素数达标的颜色」（真实墨色，而非抗锯齿灰）
+ * - bg：区域最常见颜色（原文背景色，遮盖块用它；近白色归一为纯白避免灰块）
  */
-function detectLineColor(ctx, p, line) {
+function detectLineColors(ctx, p, line) {
   const canvas = ctx.canvas;
   const x = clamp(Math.floor(line.x0 * RENDER_SCALE), 0, canvas.width - 2);
   const y = clamp(Math.floor((p.heightPt - line.y1) * RENDER_SCALE), 0, canvas.height - 2);
@@ -315,7 +315,7 @@ function detectLineColor(ctx, p, line) {
     const key = (data[i] >> 4 << 8) | (data[i + 1] >> 4 << 4) | (data[i + 2] >> 4);
     counts.set(key, (counts.get(key) || 0) + 1);
   }
-  if (total === 0) return '#000000';
+  if (total === 0) return { color: '#000000', bg: '#ffffff' };
   const toHex = (key) => {
     const r = key >> 8, g = (key >> 4) & 15, b = key & 15;
     return '#' + [r, g, b].map((v) => Math.min(255, (v << 4) + 7).toString(16).padStart(2, '0')).join('');
@@ -323,6 +323,8 @@ function detectLineColor(ctx, p, line) {
   const lum = (key) => (key >> 8) * 0.299 + ((key >> 4) & 15) * 0.587 + (key & 15) * 0.114;
   const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
   const bgKey = sorted[0][0];
+  // 近白背景（如 #f7f7f7）归一为纯白，避免在视觉白色区域出现灰色补丁
+  const bg = lum(bgKey) > 14.2 ? '#ffffff' : toHex(bgKey);
   const threshold = Math.max(8, Math.floor(total * 0.01));
   let best = null;
   for (const [key, n] of sorted) {
@@ -330,7 +332,7 @@ function detectLineColor(ctx, p, line) {
     if (n < threshold) continue;
     if (best == null || lum(key) < lum(best)) best = key;
   }
-  return best == null ? '#000000' : toHex(best);
+  return { color: best == null ? '#000000' : toHex(best), bg };
 }
 
 async function ensureTextLayer(p) {
@@ -434,10 +436,14 @@ async function ensureTextLayer(p) {
     p.textLines = merged.filter(
       (l) => l.text.trim().length > 0 && l.x1 - l.x0 > 2 && l.y1 - l.y0 > 2
     );
-    // 逐行采样检测原文颜色
+    // 逐行采样检测原文颜色与背景色
     try {
       const ctx = p.canvas.getContext('2d', { willReadFrequently: true });
-      for (const line of p.textLines) line.color = detectLineColor(ctx, p, line);
+      for (const line of p.textLines) {
+        const det = detectLineColors(ctx, p, line);
+        line.color = det.color;
+        line.bg = det.bg;
+      }
     } catch (err) {
       console.warn('颜色检测失败', err);
     }
@@ -487,8 +493,9 @@ function editTextLine(p, line, andEdit) {
     h: (line.y1 - line.y0) * RENDER_SCALE,
     text: line.text,
     fontSize: clamp(Math.round(avgSize), 6, 72),
-    whiteout: true, // 原文编辑默认用白底遮盖原文字
-    bgColor: '#ffffff',
+    whiteout: true, // 原文编辑默认遮盖原文字
+    bgColor: line.bg || '#ffffff', // 默认底色 = 检测到的原文背景色
+    coverBg: line.bg || '#ffffff', // 原位置遮盖块永远用原文背景色
     color: line.color || '#000000',
     fontId: matchFont(line.family) || el.fontSelect.value,
     bold: false,
@@ -663,7 +670,7 @@ function createBoxElement(box, page) {
   root.appendChild(handle);
 
   // 原文位置遮盖块：文本框移走后，原位置文字立即被盖住（与导出效果一致）
-  // 遮盖块始终不透明（无色时用白色）：移动即代表原文被移走，原位置不能重现文字
+  // 遮盖块始终不透明，颜色用检测到的原文背景色
   if (box.coverRect) {
     const mark = document.createElement('div');
     mark.className = 'cover-mark';
@@ -671,7 +678,7 @@ function createBoxElement(box, page) {
     mark.style.top = box.coverRect.y + 'px';
     mark.style.width = box.coverRect.w + 'px';
     mark.style.height = box.coverRect.h + 'px';
-    mark.style.backgroundColor = box.bgColor || '#ffffff';
+    mark.style.backgroundColor = box.coverBg || box.bgColor || '#ffffff';
     // 点击原位置：选中对应的文本框（而不是穿透到原文层再建新框）
     mark.addEventListener('mousedown', (e) => {
       e.preventDefault();
@@ -727,8 +734,8 @@ function applyBoxStyle(root, box) {
   root.style.width = box.w + 'px';
   root.style.height = box.h + 'px';
   root.style.backgroundColor = box.bgColor || 'transparent';
-  // 原文位置遮盖块始终不透明（无色时用白色）
-  if (root._coverMark) root._coverMark.style.backgroundColor = box.bgColor || '#ffffff';
+  // 原文位置遮盖块始终不透明，用检测到的原文背景色
+  if (root._coverMark) root._coverMark.style.backgroundColor = box.coverBg || box.bgColor || '#ffffff';
   const t = root.querySelector('.box-text');
   t.style.fontSize = box.fontSize * RENDER_SCALE + 'px';
   t.style.color = box.color || '#000000';
@@ -977,7 +984,7 @@ async function save() {
     for (const b of p.boxes) {
       if (!b.text.trim() && !b.bgColor) continue; // 空文本且无底色：跳过
       // 原文位置遮盖：文本框被移走后，在原位置补一块底色盖住原文
-      // 始终遮盖（无色时用白色），因为移动文本框即代表原文被移走
+      // 始终遮盖（用检测到的原文背景色），因为移动文本框即代表原文被移走
       if (b.coverRect) {
         annotations.push({
           pageIndex: i,
@@ -988,7 +995,7 @@ async function save() {
           text: '',
           fontSize: b.fontSize,
           whiteout: true,
-          bgColor: b.bgColor || '#ffffff',
+          bgColor: b.coverBg || b.bgColor || '#ffffff',
         });
       }
       // 竖向框：确保逐字换行输出（不同浏览器 innerText 行为可能不同）
@@ -1439,6 +1446,7 @@ window.__pdfEditor = {
       p.textLines.map((l) => ({
         text: l.text,
         color: l.color,
+        bg: l.bg,
         bbox: [l.x0, l.y0, l.x1, l.y1],
         family: l.family,
         fontNameRaw: l.fontNameRaw,
